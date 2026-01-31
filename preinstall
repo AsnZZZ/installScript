@@ -2,6 +2,17 @@
 
 # this script should be run when instructed to.
 
+if [[ $(id -u) -ne 0 ]]; then
+  echo "This script must be executed as root or using sudo."
+  exit 99
+fi
+
+logfile="/root/omv_preinstall.log"
+
+exec > >(stdbuf -oL tee -a "${logfile}") 2> >(stdbuf -oL tee -a "${logfile}" >&2)
+
+trap 'rc=$?; echo "=== END $(date -Is) rc=$rc ==="; exit $rc' EXIT
+
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
 export LANG=C.UTF-8
@@ -9,6 +20,7 @@ export LANGUAGE=C
 export LC_ALL=C.UTF-8
 
 apt-get --yes --no-install-recommends install jq
+apt-get --yes purge --autoremove cloud-init
 mac="$(ip -j a show dev eth0 | jq -r .[].address | head -n1)"
 if [ -z "${mac}" ]; then
   mac="$(ip -j a show dev end0 | jq -r .[].address | head -n1)"
