@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# shellcheck disable=SC1090,SC1091,SC2010,SC2016,SC2046,SC2086,SC2174
+# shellcheck disable=SC1090,SC1091,SC2010,SC2016,SC2046,SC2086,SC2154,SC2174
 #
 # Copyright (c) 2015-2026 openmediavault plugin developers
 # Copyright (c) 2017-2020 Armbian Developers
@@ -14,17 +14,68 @@
 # https://forum.openmediavault.org/index.php/Thread/25062-Install-OMV5-on-Debian-10-Buster/
 #
 
-logfile="omv_install.log"
-scriptversion="3.0.6"
+logfile="/root/omv_install.log"
+scriptversion="3.1.0"
+
+exec > >(stdbuf -oL tee -a "${logfile}") 2> >(stdbuf -oL tee -a "${logfile}" >&2)
+
+trap 'rc=$?; echo "=== END $(date -Is) rc=$rc ==="; exit $rc' EXIT
 
 
 _log()
 {
   msg=${1}
-  echo "[$(date +'%Y-%m-%d %H:%M:%S%z')] [omvinstall] ${msg}" | tee -a ${logfile}
+  echo "[$(date +'%Y-%m-%d %H:%M:%S%z')] [omvinstall] ${msg}"
 }
 
+ag_install() {
+  local mode="${1:-}"
+  shift || true
+  local pkgs=("$@")
+  local rc
+
+  case "${mode}" in
+    complex)
+      local aptFlags=(--yes --auto-remove --show-upgraded --allow-downgrades \
+                      --allow-change-held-packages --no-install-recommends)
+      apt-get "${aptFlags[@]}" install "${pkgs[@]}"
+      ;;
+
+    normal)
+      apt-get --yes --no-install-recommends install "${pkgs[@]}"
+      ;;
+
+    purge)
+      apt-get --yes --autoremove purge "${pkgs[@]}"
+      ;;
+
+    reinstall)
+      apt-get --yes --no-install-recommends --reinstall install "${pkgs[@]}"
+      ;;
+
+    fix-broken)
+      apt-get --yes --fix-broken install
+      ;;
+
+    rupdate)
+      apt-get --allow-releaseinfo-change update
+      ;;
+
+    update)
+      apt-get update
+      ;;
+
+    *)
+      apt-get --yes --no-install-recommends install -t "${mode}" "${pkgs[@]}"
+      ;;
+  esac
+
+  return $?
+}
+
+
 _log "script version :: ${scriptversion}"
+_log "log location :: ${logfile}"
 
 if [[ $(id -u) -ne 0 ]]; then
   echo "This script must be executed as root or using sudo."
@@ -67,8 +118,8 @@ if grep -q 'machine-lxc' /proc/1/cgroup; then
 fi
 
 declare -i armbian=0
-declare -i cfg=0
 declare -i ipv6=0
+declare -i nm=0
 declare -i rpi=0
 declare -i skipFlash=0
 declare -i skipNet=0
@@ -86,7 +137,6 @@ declare minspd=""
 declare maxspd=""
 
 aptclean="/usr/sbin/omv-aptclean"
-confCmd="omv-salt deploy run"
 crda="/etc/default/crda"
 defaultGovSearch="^CONFIG_CPU_FREQ_DEFAULT_GOV_"
 flash="flashmemory"
@@ -102,7 +152,6 @@ resolvTmp="/root/resolv.conf"
 rfkill="/usr/sbin/rfkill"
 smbOptions=""
 url="https://github.com/OpenMediaVault-Plugin-Developers/packages/raw/master"
-vsCodeList="/etc/apt/sources.list.d/vscode.list"
 wpaConf="/etc/wpa_supplicant/wpa_supplicant.conf"
 
 export DEBIAN_FRONTEND=noninteractive
@@ -171,7 +220,7 @@ _log "Starting ..."
 
 # Fix permissions on / if wrong
 _log "Current / permissions = $(stat -c %a /)"
-chmod -v g-w,o-w / 2>&1 | tee -a ${logfile}
+chmod -v g-w,o-w /
 _log "New / permissions = $(stat -c %a /)"
 
 # if ipv6 is not enabled, create apt config file to force ipv4
@@ -187,10 +236,10 @@ fi
 
 _log "Updating repos before installing..."
 echo 'Acquire::Languages "none";' | tee /etc/apt/apt.conf.d/99no-translations
-apt-get --allow-releaseinfo-change update 2>&1 | tee -a ${logfile}
+ag_install rupdate
 
 _log "Installing lsb_release..."
-apt-get --yes --no-install-recommends --reinstall install lsb-release 2>&1 | tee -a ${logfile}
+ag_install reinstall lsb-release
 
 arch="$(dpkg --print-architecture)"
 _log "Arch :: ${arch}"
@@ -248,18 +297,10 @@ _log "Copying /etc/resolv.conf to ${resolvTmp} ..."
 cp -fv /etc/resolv.conf "${resolvTmp}"
 _log "$(cat /etc/resolv.conf)"
 
-# Add Debian signing keys to raspbian to prevent apt-get update failures
-# when OMV adds security and/or backports repos
 if grep -rq raspberrypi.org /etc/apt/*; then
   rpivers="$(awk '$1 == "Revision" { print $3 }' /proc/cpuinfo)"
   _log "RPi revision code :: ${rpivers}"
   rpi=1
-  _log "Installing monit from raspberrypi repo..."
-  apt-get --yes --no-install-recommends install -t ${codename} monit 2>&1 | tee -a ${logfile}
-
-  # remove vscode repo if found since there is no desktop environment
-  # empty file will exist to keep raspberrypi-sys-mods package from adding it back
-  truncate -s 0 "${vsCodeList}"
 fi
 
 # remove armbian netplan file if found
@@ -269,13 +310,13 @@ if [ -e "${anp}" ]; then
   rm -fv "${anp}"
 fi
 
-dpkg -P udisks2 2>&1 | tee -a ${logfile}
+dpkg -P udisks2
 
 _log "Install prerequisites..."
-apt-get --yes --no-install-recommends install gnupg wget 2>&1 | tee -a ${logfile}
+ag_install normal gnupg wget
 
 if [ ${armbian} -eq 1 ]; then
-  systemctl unmask systemd-networkd.service 2>&1 | tee -a ${logfile}
+  systemctl unmask systemd-networkd.service
   # save off cpuFreq settings before installing the openmediavault
   if [ -f "${cpuFreqDef}" ]; then
     . ${cpuFreqDef}
@@ -292,12 +333,10 @@ systemctl enable ssh.service
 omvInstall=$(dpkg -l | awk '$2 == "openmediavault" { print $1 }')
 if [[ ! "${omvInstall}" == "ii" ]]; then
   _log "Installing openmediavault required packages..."
-  apt-get --yes --no-install-recommends install postfix 2>&1 | tee -a ${logfile}
-  if [ ${PIPESTATUS[0]} -gt 0 ]; then
+  if ! ag_install normal postfix; then
     _log "failed installing postfix"
     sed -i '/^myhostname/d' /etc/postfix/main.cf
-    apt-get --yes --fix-broken install 2>&1 | tee -a ${logfile}
-    if [ ${PIPESTATUS[0]} -gt 0 ]; then
+    if ! ag_install fix-broken; then
       _log "failed installing postfix and unable to fix"
       exit 2
     fi
@@ -308,23 +347,20 @@ if [[ ! "${omvInstall}" == "ii" ]]; then
   wget --quiet --output-document=- "${omvKeyUrl}" | gpg --dearmor --yes --output "${omvKey}"
 
   _log "Updating repos..."
-  apt-get update 2>&1 | tee -a ${logfile}
-  if [ ${PIPESTATUS[0]} -gt 0 ]; then
+  if ! ag_install update; then
     _log "failed to update apt repos."
     exit 2
   fi
 
   _log "Install openmediavault-keyring..."
-  apt-get --yes install openmediavault-keyring 2>&1 | tee -a ${logfile}
-  if [ ${PIPESTATUS[0]} -gt 0 ]; then
+  if ! ag_install normal openmediavault-keyring; then
     _log "failed to install openmediavault-keyring package."
     exit 2
   fi
 
   monitInstall=$(dpkg -l | awk '$2 == "monit" { print $1 }')
   if [[ ! "${monitInstall}" == "ii" ]]; then
-    apt-get --yes --no-install-recommends install monit 2>&1 | tee -a ${logfile}
-    if [ ${PIPESTATUS[0]} -gt 0 ]; then
+    if ! ag_install normal monit; then
       _log "failed installing monit"
       exit 2
     fi
@@ -332,8 +368,7 @@ if [[ ! "${omvInstall}" == "ii" ]]; then
 
   saltInstall=$(dpkg -l | awk '$2 == "salt-minion" { print $1 }')
   if [[ ! "${saltInstall}" == "ii" ]] && [ ${version} -eq 8 ]; then
-    apt-get --yes --no-install-recommends install salt-common salt-minion python3-samba 2>&1 | tee -a ${logfile}
-    if [ ${PIPESTATUS[0]} -gt 0 ]; then
+    if ! ag_install normal salt-common salt-minion python3-samba; then
       _log "failed installing salt"
       exit 2
     fi
@@ -341,23 +376,20 @@ if [[ ! "${omvInstall}" == "ii" ]]; then
 
   omvsaltInstall=$(dpkg -l | awk '$2 == "openmediavault-salt" { print $1 }')
   if [[ ! "${omvsaltInstall}" == "ii" ]] && [ ${version} -eq 8 ]; then
-    apt-get --yes --no-install-recommends install openmediavault-salt 2>&1 | tee -a ${logfile}
-    if [ ${PIPESTATUS[0]} -gt 0 ]; then
+    if ! ag_install normal openmediavault-salt; then
       _log "failed installing openmediavault-salt"
       exit 2
     fi
   fi
 
   _log "Installing openmediavault..."
-  aptFlags="--yes --auto-remove --show-upgraded --allow-downgrades --allow-change-held-packages --no-install-recommends"
-  apt-get ${aptFlags} install openmediavault 2>&1 | tee -a ${logfile}
-  if [ ${PIPESTATUS[0]} -gt 0 ]; then
+  if ! ag_install complex openmediavault; then
     _log "failed to install openmediavault package."
     exit 2
   fi
 
-  omv-confdbadm populate 2>&1 | tee -a ${logfile}
-  omv-salt deploy run hosts 2>&1 | tee -a ${logfile}
+  omv-confdbadm populate
+  omv-salt deploy run hosts
 fi
 _log "Testing DNS..."
 if ! ping -4 -q -c2 omv-extras.org 2>/dev/null; then
@@ -405,15 +437,14 @@ if [ ${useMirror} -eq 1 ]; then
   omv_set_default OMV_PROXMOX_APT_REPOSITORY_URL "${mirror}/proxmox/debian" true
 
   # update pillar default list - /srv/pillar/omv/default.sls
-  omv-salt stage run prepare 2>&1 | tee -a ${logfile}
-
-# ensure CPU power package is present (varies by OMV version)
-_log "Installing CPU power package: ${cpuPkg} ..."
-apt-get --yes --no-install-recommends install ${cpuPkg} 2>&1 | tee -a ${logfile}
-
+  omv-salt stage run prepare
 
   # update config files
-  ${confCmd} apt 2>&1 | tee -a ${logfile}
+  omv-salt deploy run apt
+
+  # ensure CPU power package is present (varies by OMV version)
+  _log "Installing CPU power package: ${cpuPkg} ..."
+  ag_install normal ${cpuPkg}
 fi
 
 # install omv-extras
@@ -421,18 +452,17 @@ _log "Downloading omv-extras.org plugin for openmediavault ${version}.x ..."
 file="openmediavault-omvextrasorg_latest_all${version}.deb"
 
 if [ -f "${file}" ]; then
-  rm ${file}
+  rm "${file}"
 fi
 wget ${url}/${file}
 if [ -f "${file}" ]; then
   if ! dpkg --install ${file}; then
     _log "Installing other dependencies ..."
-    apt-get --yes --fix-broken install 2>&1 | tee -a ${logfile}
+    ag_install fix-broken
     omvextrasInstall=$(dpkg -l | awk '$2 == "openmediavault-omvextrasorg" { print $1 }')
     if [[ ! "${omvextrasInstall}" == "ii" ]]; then
       _log "omv-extras failed to install correctly.  Trying to fix apt ..."
-      apt-get --yes --fix-broken install 2>&1 | tee -a ${logfile}
-      if [ ${PIPESTATUS[0]} -gt 0 ]; then
+      if ! ag_install fix-broken; then
         _log "Fix failed and openmediavault-omvextrasorg is in a bad state."
         exit 3
       fi
@@ -445,7 +475,7 @@ if [ -f "${file}" ]; then
   fi
 
   _log "Updating repos ..."
-  ${aptclean} repos 2>&1 | tee -a ${logfile}
+  ${aptclean} repos
 else
   _log "There was a problem downloading the package."
 fi
@@ -453,8 +483,8 @@ fi
 # disable armbian log services if found
 for service in log2ram armbian-ramlog armbian-zram-config; do
   if systemctl list-units --full -all | grep ${service}; then
-    systemctl stop ${service} 2>&1 | tee -a ${logfile}
-    systemctl disable ${service} 2>&1 | tee -a ${logfile}
+    systemctl stop ${service}
+    systemctl disable ${service}
   fi
 done
 rm -f /etc/cron.daily/armbian-ram-logging
@@ -475,24 +505,19 @@ if [ ${skipFlash} -eq 1 ]; then
 else
   if [ "${flash}" = "flashmemory" ]; then
     _log "Install folder2ram..."
-    apt-get --yes --fix-missing --no-install-recommends install folder2ram 2>&1 | tee -a ${logfile}
-    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+    if ! ag_install normal folder2ram; then
       _log "Installed folder2ram."
     else
       _log "Failed to install folder2ram."
     fi
   fi
   _log "Install ${flash} plugin..."
-  apt-get --yes install openmediavault-${flash} 2>&1 | tee -a ${logfile}
-  if [ ${PIPESTATUS[0]} -eq 0 ]; then
+  if ! ag_install normal openmediavault-${flash}; then
     _log "Installed ${flash} plugin."
   else
-    _log "Failed to install ${flash} plugin."
-    ${confCmd} ${flash} 2>&1 | tee -a ${logfile}
-    apt-get --yes --fix-broken install 2>&1 | tee -a ${logfile}
-  fi
-  if [ ! "${flash}" = "flashmemory" ]; then
-    omv_config_update "/config/services/writecache/enable" "1"
+    _log "Failed to install ${flash} plugin. Fixing ..."
+    omv-salt deploy run ${flash}
+    ag_install fix-broken
   fi
 fi
 
@@ -511,8 +536,8 @@ fi
 
 # disable monitoring and apply changes
 _log "Disabling data collection ..."
-/usr/sbin/omv-rpc -u admin "perfstats" "set" '{"enable":false}' 2>&1 | tee -a ${logfile}
-/usr/sbin/omv-rpc -u admin "config" "applyChanges" '{ "modules": ["monit","rrdcached","collectd"],"force": true }' 2>&1 | tee -a ${logfile}
+/usr/sbin/omv-rpc -u admin "perfstats" "set" '{"enable":false}'
+/usr/sbin/omv-rpc -u admin "config" "applyChanges" '{ "modules": ["monit","rrdcached","collectd"],"force": true }'
 
 # set min/max frequency and watchdog for RPi boards
 rpi_model="/proc/device-tree/model"
@@ -581,13 +606,13 @@ else
 fi
 
 # update pillar default list - /srv/pillar/omv/default.sls
-omv-salt stage run prepare 2>&1 | tee -a ${logfile}
+omv-salt stage run prepare
 
 # update config files
-${confCmd} nginx phpfpm samba ${flash} ssh chrony timezone monit rrdcached collectd ${cpuState} apt watchdog 2>&1 | tee -a ${logfile}
+omv-salt deploy run nginx phpfpm samba ${flash} ssh chrony timezone monit rrdcached collectd ${cpuState} apt watchdog
 
 # restart engined
-systemctl restart openmediavault-engined 2>&1 | tee -a ${logfile}
+systemctl restart openmediavault-engined
 
 # create php directories if they don't exist
 modDir="/var/lib/php/modules"
@@ -610,7 +635,11 @@ fi
 
 # add admin user to openmediavault-admin group if it exists
 if getent passwd admin > /dev/null; then
-  usermod -a -G openmediavault-admin admin 2>&1 | tee -a ${logfile}
+  usermod -a -G openmediavault-admin admin
+fi
+
+if [ ${skipFlash} -ne 1 ] && [ "${flash}" = "writecache" ]; then
+  omv-writecache flush
 fi
 
 if [[ "${arch}" == "amd64" ]] || [[ "${arch}" == "i386" ]]; then
@@ -627,7 +656,7 @@ if [ ! "${GOVERNOR,,}" = "schedutil" ]; then
 :msg, contains, "netsnmp_assert" ~
 :msg, contains, "Failed to initiate sched scan" ~
 EOF
-  systemctl restart rsyslog 2>&1 | tee -a ${logfile}
+  systemctl restart rsyslog
 
   # add taskset to ionice cronjob for biglittle boards
   case ${BOARD} in
@@ -694,15 +723,13 @@ if [ ${skipNet} -ne 1 ]; then
     fi
   fi
 
-  _log "Removing old NetworkManager netplan files..."
-  grep -l NetworkManager /etc/netplan/* | xargs -r rm -fv 2>&1 | tee -a ${logfile}
-
-  _log "Removing network-manager and dhcpcd5 ..."
-  apt-get -y --autoremove purge network-manager dhcpcd5 2>&1 | tee -a ${logfile}
+  if systemctl is-active --quiet network-manager 2>/dev/null; then
+    nm=1
+  fi
 
   _log "Enable and start systemd-resolved ..."
-  systemctl enable systemd-resolved 2>&1 | tee -a ${logfile}
-  systemctl start systemd-resolved 2>&1 | tee -a ${logfile}
+  systemctl enable systemd-resolved
+  systemctl start systemd-resolved
   rm /etc/resolv.conf
   ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
 
@@ -712,6 +739,9 @@ if [ ${skipNet} -ne 1 ]; then
   fi
 
   for nic in $(ls /sys/class/net | grep -vE "br-|docker|dummy|ip6|lo|sit|tun|veth|virbr|wg"); do
+    if [ ${nm} -eq 1 ]; then
+      nmcli device set "${nic}" managed no || true
+    fi
     if grep -q "<devicename>${nic}</devicename>" ${OMV_CONFIG_FILE}; then
       _log "${nic} already found in database.  Skipping..."
       continue
@@ -730,9 +760,6 @@ if [ ${skipNet} -ne 1 ]; then
           jq --null-input --compact-output \
             "{uuid: \"${OMV_CONFIGOBJECT_NEW_UUID}\", devicename: \"${nic}\", type: \"wifi\", method: \"dhcp\", method6: \"dhcp\", wpassid: \"${wifiName}\", wpapsk: \"${wifiPass}\"}" | \
             omv-confdbadm update "conf.system.network.interface" -
-          if grep -q "<devicename>${nic}</devicename>" ${OMV_CONFIG_FILE}; then
-            cfg=1
-          fi
         fi
       fi
     else
@@ -752,31 +779,45 @@ if [ ${skipNet} -ne 1 ]; then
         "{uuid: \"${OMV_CONFIGOBJECT_NEW_UUID}\", devicename: \"${nic}\", method: \"dhcp\", method6: \"dhcp\"}" | \
         omv-confdbadm update "conf.system.network.interface" -
       fi
-
-      if grep -q "<devicename>${nic}</devicename>" ${OMV_CONFIG_FILE}; then
-        cfg=1
-      fi
     fi
   done
 
-  if [ ${cfg} -eq 1 ]; then
-    _log "IP address may change and you could lose connection if running this script via ssh."
+  _log "Removing old NetworkManager netplan files..."
+  grep -l NetworkManager /etc/netplan/* 2>/dev/null | xargs -r rm -fv
 
-    # create config files
-    ${confCmd} systemd-networkd 2>&1 | tee -a ${logfile}
-    if [ ${PIPESTATUS[0]} -gt 0 ]; then
-      _log "Error applying network changes.  Skipping reboot!"
-      skipReboot=1
-    fi
-
-    if [ ${skipReboot} -ne 1 ]; then
-      _log "Network setup.  Rebooting..."
-      reboot
-    fi
-  else
-    _log "It is recommended to reboot and then setup the network adapter in the openmediavault web interface."
+  if [ ${nm} -eq 1 ]; then
+    _log "Disable NetworkManager start on boot ..."
+    systemctl disable NetworkManager
   fi
 
+  _log "IP address may change and you could lose connection if running this script via ssh."
+
+  reboot_unit="omv-net-reboot"
+
+  if [ ${skipReboot} -ne 1 ]; then
+    _log "Scheduling reboot for 4 minutes from now"
+    systemd-run --unit="${reboot_unit}" --on-active=4min /usr/bin/systemctl reboot
+    _log "Look at ${logfile} after reboot for all details."
+  fi
+
+  _log "Removing network-manager and dhcpcd5 ..."
+  nm_pkgs=(network-manager dhcpcd5 cloud-init)
+  ag_install purge "${nm_pkgs[@]}"
+
+  # create config files
+  _log "Applying network changes with omv-salt. Connection may drop ..."
+  if ! omv-salt deploy run systemd-networkd; then
+    _log "Error applying network changes."
+  fi
+
+  if [ ${skipReboot} -ne 1 ]; then
+    _log "Rebooting (canceling scheduled fallback first) ..."
+    systemctl cancel "${reboot_unit}.timer" 2>/dev/null || true
+    systemctl stop "${reboot_unit}.service" 2>/dev/null || true
+
+    _log "Rebooting ..."
+    reboot
+  fi
 fi
 
 _log "done."
