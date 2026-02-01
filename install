@@ -301,6 +301,9 @@ if grep -rq raspberrypi.org /etc/apt/*; then
   rpivers="$(awk '$1 == "Revision" { print $3 }' /proc/cpuinfo)"
   _log "RPi revision code :: ${rpivers}"
   rpi=1
+  if [ ${version} -eq 8 ]; then
+    dpkg --remove-architecture armhf
+  fi
 fi
 
 # remove armbian netplan file if found
