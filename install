@@ -15,7 +15,7 @@
 #
 
 logfile="/root/omv_install.log"
-scriptversion="3.1.0"
+scriptversion="3.1.1"
 
 exec > >(stdbuf -oL tee -a "${logfile}") 2> >(stdbuf -oL tee -a "${logfile}" >&2)
 
@@ -414,10 +414,6 @@ fi
 . /etc/default/openmediavault
 . /usr/share/openmediavault/scripts/helper-functions
 
-if [ ${version} -eq 8 ]; then
-  /usr/sbin/omv-rpc -u admin "powermgmt" "set" '{"cpufreq":false,"powerbtn":"nothing","standbymode":"poweroff"}'
-fi
-
 # remove backports from sources.list to avoid duplicate sources warning
 sed -i "/\(trixie\|bookworm\)-backports/d" /etc/apt/sources.list
 
@@ -597,11 +593,14 @@ else
 fi
 
 # set defaults in /etc/default/openmediavault
-# set defaults in /etc/default/openmediavault
 if [ ${version} -ge 8 ]; then
-  omv_set_default "OMV_CPUPOWER_GOVERNOR" "${GOVERNOR}"
   omv_set_default "OMV_CPUPOWER_MINSPEED" "${MIN_SPEED}"
   omv_set_default "OMV_CPUPOWER_MAXSPEED" "${MAX_SPEED}"
+  if systemd-detect-virt --quiet; then
+    GOVERNOR=""
+  fi
+  /usr/sbin/omv-rpc -u admin powermgmt set "{\"cpufreqgovernor\":\"${GOVERNOR}\",\"powerbtn\":\"nothing\",\"standbymode\":\"poweroff\"}"
+
 else
   omv_set_default "OMV_CPUFREQUTILS_GOVERNOR" "${GOVERNOR}"
   omv_set_default "OMV_CPUFREQUTILS_MINSPEED" "${MIN_SPEED}"
