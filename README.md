@@ -10,17 +10,31 @@ For the new user guide, visit https://wiki.omv-extras.org/doku.php?id=omv6:new_u
 
 ### installScript
 - Please use a new SD card if installing on an arm/sbc device and flash it with the latest (see notes below about version) Debian OS Lite (without desktop environment) or Server image available for your SBC.
-- This script will install openmediavault, omv-extras, and flashmemory. If you already have openmediavault installed don't worry, your openmediavault will be preserved, only the not installed will be added to the system.
+- This script will install openmediavault, omv-extras, and the writecache plugin. If you already have openmediavault installed don't worry, your openmediavault will be preserved, only the not installed will be added to the system.
 - Installing OMV with a desktop environment is NOT supported.  Please read the forum for the many reasons why.
 - This script may alter previous network setups.  This has a greater chance of breaking wifi setup.  Please read the install manual for more help - https://wiki.omv-extras.org/
 
 ### Notes
 - This script will always install
-  - OMV 7.x on Debian 12 (Bookworm)
-  - OMV 8.x on Debian 13 (trixie)
+  - OMV 8.x on Debian 13 (Trixie)
+
+### Installing older OMV versions
+This `install` script only supports the current OMV release (OMV 8.x on Debian 13 Trixie). To install an older, end-of-life OMV version, use the matching `installOld` script for your Debian release:
+
+| OMV version | Debian release | Script |
+| --- | --- | --- |
+| OMV 7.x | Debian 12 (Bookworm) | `installOld7` |
+| OMV 6.x | Debian 11 (Bullseye) | `installOld6` |
+| OMV 5.x | Debian 10 (Buster) | `installOld5` |
+
+For example, to install OMV 7.x on Debian 12 (Bookworm):
+```bash
+sudo wget -O - https://github.com/OpenMediaVault-Plugin-Developers/installScript/raw/master/installOld7 | sudo bash
+```
+These older scripts are unmaintained and provided as-is. EOL (end-of-life) versions of OMV may no longer install properly, as their package repositories and dependencies are no longer maintained and may have been removed.
 
 ### Installation
-To install OMV, OMV-Extras and Flashmemory copy and paste this line in the Terminal and press Enter. The installation will take some time, so enjoy the text flying on the screen.
+To install OMV, OMV-Extras and the writecache plugin copy and paste this line in the Terminal and press Enter. The installation will take some time, so enjoy the text flying on the screen.
 
 ***The installation process demands sudo utilization.***
 
