@@ -15,7 +15,7 @@
 #
 
 logfile="/root/omv_install.log"
-scriptversion="3.1.1"
+scriptversion="3.2.0"
 
 exec > >(stdbuf -oL tee -a "${logfile}") 2> >(stdbuf -oL tee -a "${logfile}" >&2)
 
@@ -71,6 +71,93 @@ ag_install() {
   esac
 
   return $?
+}
+
+# Echo a cpufreq governor that is actually supported by the running
+# kernel/driver, falling back sensibly when the requested one is unavailable.
+validate_governor() {
+  local want="${1}"
+  # base is overridable so the logic can be unit-tested against fixture sysfs
+  local base="${SYS_CPUFREQ_BASE:-/sys/devices/system/cpu/cpu0}"
+  local availPath="${base}/cpufreq/scaling_available_governors"
+  local driverPath="${base}/cpufreq/scaling_driver"
+  local avail="" driver="" fb=""
+
+  # No cpufreq sysfs (e.g. a VM): nothing to validate against.
+  [ -r "${availPath}" ] || { echo "${want}"; return; }
+  avail="$(<"${availPath}")"
+
+  if [ -n "${want}" ] && grep -qwF -- "${want}" <<<"${avail}"; then
+    echo "${want}"
+    return
+  fi
+
+  [ -r "${driverPath}" ] && driver="$(<"${driverPath}")"
+  # On intel_pstate the only governors are performance/powersave, and
+  # powersave there is dynamic scaling (a sane NAS default).
+  if [ "${driver}" = "intel_pstate" ]; then
+    echo "powersave"
+    return
+  fi
+
+  # Otherwise prefer dynamic governors; powersave on generic drivers pins
+  # the CPU to its minimum frequency, so it is the last resort.
+  for fb in schedutil ondemand conservative performance powersave; do
+    if grep -qwF -- "${fb}" <<<"${avail}"; then
+      echo "${fb}"
+      return
+    fi
+  done
+
+  echo "${avail%% *}"
+}
+
+# Discover wifi credentials for an interface, setting the globals
+# wifiName / wifiPass / country. Tries wpa_supplicant first, then a
+# NetworkManager keyfile (rpi-imager on Bookworm and newer). All paths are
+# overridable so the logic can be unit-tested against fixtures.
+get_wifi_credentials() {
+  local nic="${1}"
+  local wpaConf="${WPA_CONF:-/etc/wpa_supplicant/wpa_supplicant.conf}"
+  local nmConnDir="${NM_CONN_DIR:-/etc/NetworkManager/system-connections}"
+  local regdomFile="${REGDOM_FILE:-/sys/module/cfg80211/parameters/ieee80211_regdom}"
+  local crdaFile="${CRDA_FILE:-/etc/default/crda}"
+  local nmConn reg
+
+  country=""
+  wifiName=""
+  wifiPass=""
+
+  # Legacy source: wpa_supplicant (older images / manual setups)
+  if [ -f "${wpaConf}" ]; then
+    country=$(awk -F'=' '/country=/{gsub(/["\r]/,""); print $NF}' "${wpaConf}")
+    wifiName=$(awk -F'=' '/ssid="/{st=index($0,"="); ssid=substr($0,st+1); gsub(/["\r]/,"",ssid); print ssid; exit}' "${wpaConf}")
+    wifiPass=$(awk -F'=' '/psk="/{st=index($0,"="); pass=substr($0,st+1); gsub(/["\r]/,"",pass); print pass; exit}' "${wpaConf}")
+  fi
+
+  # NetworkManager keyfile source (rpi-imager on Bookworm and newer)
+  if { [ -z "${wifiName}" ] || [ -z "${wifiPass}" ]; } && [ -d "${nmConnDir}" ]; then
+    # prefer a profile bound to this interface, else the first wifi profile
+    nmConn=$(grep -rls -e '^type=wifi' -e '^type=802-11-wireless' "${nmConnDir}" 2>/dev/null \
+             | xargs -r grep -l "interface-name=${nic}" 2>/dev/null | head -n1)
+    [ -z "${nmConn}" ] && nmConn=$(grep -rls -e '^type=wifi' -e '^type=802-11-wireless' "${nmConnDir}" 2>/dev/null | head -n1)
+    if [ -n "${nmConn}" ]; then
+      _log "Reading wifi credentials from NetworkManager profile ${nmConn} ..."
+      wifiName=$(awk '/^ssid=/{print substr($0, index($0,"=")+1); exit}' "${nmConn}" | tr -d '\r')
+      wifiPass=$(awk '/^psk=/{print substr($0, index($0,"=")+1); exit}' "${nmConn}" | tr -d '\r')
+    fi
+  fi
+
+  # Best-effort wifi country (only used to update crda); no extra dependencies
+  if [ -z "${country}" ] && [ -r "${regdomFile}" ]; then
+    reg=$(tr -d '\r\n' < "${regdomFile}")
+    [ "${reg}" != "00" ] && country="${reg}"
+  fi
+
+  # Apply the regulatory domain to crda when we have a country and crda exists
+  if [ -n "${country}" ] && [ -f "${crdaFile}" ]; then
+    awk -i inplace -F'=' -v country="${country}" '/REGDOMAIN=/{$0=$1"="country} {print $0}' "${crdaFile}"
+  fi
 }
 
 
@@ -137,9 +224,8 @@ declare minspd=""
 declare maxspd=""
 
 aptclean="/usr/sbin/omv-aptclean"
-crda="/etc/default/crda"
 defaultGovSearch="^CONFIG_CPU_FREQ_DEFAULT_GOV_"
-flash="flashmemory"
+flash="writecache"
 forceIpv4="/etc/apt/apt.conf.d/99force-ipv4"
 ioniceCron="/etc/cron.d/make_nas_processes_faster"
 ioniceScript="/usr/sbin/omv-ionice"
@@ -152,7 +238,6 @@ resolvTmp="/root/resolv.conf"
 rfkill="/usr/sbin/rfkill"
 smbOptions=""
 url="https://github.com/OpenMediaVault-Plugin-Developers/packages/raw/master"
-wpaConf="/etc/wpa_supplicant/wpa_supplicant.conf"
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
@@ -175,7 +260,7 @@ while getopts "fhimnr" opt; do
     h)
       echo "Use the following flags:"
       echo "  -f"
-      echo "    to skip the installation of the flashmemory (omv7) / writecache (omv8) plugin"
+      echo "    to skip the installation of the writecache (omv8) plugin"
       echo "  -i"
       echo "    enable using IPv6 for apt"
       echo "  -m"
@@ -192,7 +277,6 @@ while getopts "fhimnr" opt; do
       echo ""
       echo "Notes:"
       echo "  This script will always install:"
-      echo "    - OMV 7.x (sandworm) on Debian 12 (Bookworm)"
       echo "    - OMV 8.x (synchrony) on Debian 13 (Trixie)"
       echo ""
       exit 100
@@ -248,22 +332,9 @@ codename="$(lsb_release --codename --short)"
 _log "Codename :: ${codename}"
 
 case ${codename} in
-  bookworm)
-    omvCodename="sandworm"
-    version=7
-    if [[ ! ${arch} =~ ^(arm64|armhf|amd64|i386)$ ]]; then
-      _log "Unsupported architecture :: ${arch}"
-      exit 5
-    fi
-    cpuPkg="cpufrequtils"
-    cpuState="cpufrequtils"
-    cpuFreqDef="/etc/default/cpufrequtils"
-    ;;
-
   trixie)
     omvCodename="synchrony"
     version=8
-    flash="writecache"
     if [[ ! ${arch} =~ ^(arm64|amd64)$ ]]; then
       _log "Unsupported architecture :: ${arch}"
       exit 5
@@ -273,7 +344,7 @@ case ${codename} in
     cpuFreqDef="/etc/default/cpupower"
     ;;
   *)
-    _log "Unsupported version.  Only 12 (Bookworm) and 13 (Trixie) are supported.  Exiting..."
+    _log "Unsupported version.  Only 13 (Trixie) is supported.  Exiting..."
     exit 1
   ;;
 esac
@@ -301,9 +372,7 @@ if grep -rq raspberrypi.org /etc/apt/*; then
   rpivers="$(awk '$1 == "Revision" { print $3 }' /proc/cpuinfo)"
   _log "RPi revision code :: ${rpivers}"
   rpi=1
-  if [ ${version} -eq 8 ]; then
-    dpkg --remove-architecture armhf
-  fi
+  dpkg --remove-architecture armhf
 fi
 
 # remove armbian netplan file if found
@@ -370,7 +439,7 @@ if [[ ! "${omvInstall}" == "ii" ]]; then
   fi
 
   saltInstall=$(dpkg -l | awk '$2 == "salt-minion" { print $1 }')
-  if [[ ! "${saltInstall}" == "ii" ]] && [ ${version} -eq 8 ]; then
+  if [[ ! "${saltInstall}" == "ii" ]]; then
     if ! ag_install normal salt-common salt-minion python3-samba; then
       _log "failed installing salt"
       exit 2
@@ -378,7 +447,7 @@ if [[ ! "${omvInstall}" == "ii" ]]; then
   fi
 
   omvsaltInstall=$(dpkg -l | awk '$2 == "openmediavault-salt" { print $1 }')
-  if [[ ! "${omvsaltInstall}" == "ii" ]] && [ ${version} -eq 8 ]; then
+  if [[ ! "${omvsaltInstall}" == "ii" ]]; then
     if ! ag_install normal openmediavault-salt; then
       _log "failed installing openmediavault-salt"
       exit 2
@@ -415,7 +484,7 @@ fi
 . /usr/share/openmediavault/scripts/helper-functions
 
 # remove backports from sources.list to avoid duplicate sources warning
-sed -i "/\(trixie\|bookworm\)-backports/d" /etc/apt/sources.list
+sed -i "/trixie-backports/d" /etc/apt/sources.list
 
 if [ ${rpi} -eq 1 ]; then
   if [ ! "${arch}" = "arm64" ]; then
@@ -498,18 +567,10 @@ if [ -f "/etc/systemd/system/logrotate.service" ]; then
   systemctl daemon-reload
 fi
 
-# install flashmemory/writecache plugin unless disabled
+# install writecache plugin unless disabled
 if [ ${skipFlash} -eq 1 ]; then
   _log "Skipping installation of the ${flash} plugin."
 else
-  if [ "${flash}" = "flashmemory" ]; then
-    _log "Install folder2ram..."
-    if ! ag_install normal folder2ram; then
-      _log "Installed folder2ram."
-    else
-      _log "Failed to install folder2ram."
-    fi
-  fi
   _log "Install ${flash} plugin..."
   if ! ag_install normal openmediavault-${flash}; then
     _log "Installed ${flash} plugin."
@@ -541,10 +602,6 @@ _log "Disabling data collection ..."
 # set min/max frequency and watchdog for RPi boards
 rpi_model="/proc/device-tree/model"
 if [ -f "${rpi_model}" ] && [[ $(awk '{ print $1 }' ${rpi_model}) = "Raspberry" ]]; then
-  if [ ${version} -lt 6 ]; then
-    omv_set_default "OMV_WATCHDOG_DEFAULT_MODULE" "bcm2835_wdt"
-    omv_set_default "OMV_WATCHDOG_CONF_WATCHDOG_TIMEOUT" "14"
-  fi
   omv_set_default "OMV_WATCHDOG_SYSTEMD_RUNTIMEWATCHDOGSEC" "14s" true
 
   MIN_SPEED="$(</sys/devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq)"
@@ -593,19 +650,23 @@ else
 fi
 
 # set defaults in /etc/default/openmediavault
-if [ ${version} -ge 8 ]; then
-  omv_set_default "OMV_CPUPOWER_MINSPEED" "${MIN_SPEED}"
-  omv_set_default "OMV_CPUPOWER_MAXSPEED" "${MAX_SPEED}"
-  if systemd-detect-virt --quiet; then
-    GOVERNOR=""
-  fi
-  /usr/sbin/omv-rpc -u admin powermgmt set "{\"cpufreqgovernor\":\"${GOVERNOR}\",\"powerbtn\":\"nothing\",\"standbymode\":\"poweroff\"}"
-
+omv_set_default "OMV_CPUPOWER_MINSPEED" "${MIN_SPEED}"
+omv_set_default "OMV_CPUPOWER_MAXSPEED" "${MAX_SPEED}"
+# In a VM there is no real cpufreq control; leave the governor unset but
+# still apply the power button/standby defaults.
+if systemd-detect-virt --quiet; then
+  GOVERNOR=""
 else
-  omv_set_default "OMV_CPUFREQUTILS_GOVERNOR" "${GOVERNOR}"
-  omv_set_default "OMV_CPUFREQUTILS_MINSPEED" "${MIN_SPEED}"
-  omv_set_default "OMV_CPUFREQUTILS_MAXSPEED" "${MAX_SPEED}"
+  validGov="$(validate_governor "${GOVERNOR}")"
+  if [ "${validGov}" != "${GOVERNOR}" ]; then
+    _log "Warning: governor '${GOVERNOR}' not supported, falling back to '${validGov}'"
+    GOVERNOR="${validGov}"
+  fi
 fi
+/usr/sbin/omv-rpc -u admin powermgmt set \
+  "$(jq --null-input --compact-output --arg gov "${GOVERNOR}" \
+    '{"cpufreqgovernor":$gov,"powerbtn":"nothing","standbymode":"poweroff"}')" \
+  || _log "Warning: failed to set powermgmt"
 
 # update pillar default list - /srv/pillar/omv/default.sls
 omv-salt stage run prepare
@@ -644,7 +705,7 @@ if [ ${skipFlash} -ne 1 ] && [ "${flash}" = "writecache" ]; then
   omv-writecache flush
 fi
 
-if [[ "${arch}" == "amd64" ]] || [[ "${arch}" == "i386" ]]; then
+if [[ "${arch}" == "amd64" ]]; then
   # skip ionice on x86 boards
   _log "Done."
   exit 0
@@ -713,17 +774,6 @@ if [ ${skipNet} -ne 1 ]; then
 
   defLink="/etc/systemd/network/99-default.link"
   rm -fv "${defLink}"
-  if [ ${rpi} -eq 1 ] && [ ${version} -eq 7 ]; then
-    _log "Force eth0 name on RPi ..."
-    mac="$(ip -j a show dev eth0 | jq -r .[].address | head -n1)"
-    if [ -z "${mac}" ]; then
-      mac="$(ip -j a show dev end0 | jq -r .[].address | head -n1)"
-    fi
-    _log "mac address - ${mac}"
-    if [ -n "${mac}" ]; then
-      echo -e "[Match]\nMACAddress=${mac}\n[Link]\nName=eth0" > /etc/systemd/network/10-persistent-eth0.link
-    fi
-  fi
 
   if systemctl is-active --quiet network-manager 2>/dev/null; then
     nm=1
@@ -749,20 +799,14 @@ if [ ${skipNet} -ne 1 ]; then
       continue
     fi
     if udevadm info /sys/class/net/${nic} | grep -q wlan; then
-      if [ -f "${wpaConf}" ]; then
-        country=$(awk -F'=' '/country=/{gsub(/["\r]/,""); print $NF}' ${wpaConf})
-        wifiName=$(awk -F'=' '/ssid="/{st=index($0,"="); ssid=substr($0,st+1); gsub(/["\r]/,"",ssid); print ssid; exit}' ${wpaConf})
-        wifiPass=$(awk -F'=' '/psk="/{st=index($0,"="); pass=substr($0,st+1); gsub(/["\r]/,"",pass); print pass; exit}' ${wpaConf})
-
-        if [ -n "${country}" ] && [ -n "${wifiName}" ] && [ -n "${wifiPass}" ]; then
-          if [ -f "${crda}" ]; then
-            awk -i inplace -F'=' -v country="$country" '/REGDOMAIN=/{$0=$1"="country} {print $0}' ${crda}
-          fi
-          _log "Adding ${nic} to openmedivault database ..."
-          jq --null-input --compact-output \
-            "{uuid: \"${OMV_CONFIGOBJECT_NEW_UUID}\", devicename: \"${nic}\", type: \"wifi\", method: \"dhcp\", method6: \"dhcp\", wpassid: \"${wifiName}\", wpapsk: \"${wifiPass}\"}" | \
-            omv-confdbadm update "conf.system.network.interface" -
-        fi
+      get_wifi_credentials "${nic}"
+      if [ -n "${wifiName}" ] && [ -n "${wifiPass}" ]; then
+        _log "Adding ${nic} to openmedivault database ..."
+        jq --null-input --compact-output \
+          "{uuid: \"${OMV_CONFIGOBJECT_NEW_UUID}\", devicename: \"${nic}\", type: \"wifi\", method: \"dhcp\", method6: \"dhcp\", wpassid: \"${wifiName}\", wpapsk: \"${wifiPass}\"}" | \
+          omv-confdbadm update "conf.system.network.interface" -
+      else
+        _log "No wifi credentials found for ${nic} (checked wpa_supplicant and NetworkManager); skipping."
       fi
     else
       _log "Adding ${nic} to openmedivault database ..."
