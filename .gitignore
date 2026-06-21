@@ -35,6 +35,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# Test VM artifacts (downloaded images, throwaway run dirs)
+tests/vm/.artifacts/
+
 # OpenMediaVault / Debian
 debian/openmediavault-*
 debian/files
